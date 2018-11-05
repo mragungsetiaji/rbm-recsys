@@ -1,147 +1,143 @@
-
-from __future__ import division
 import numpy as np
-import pdb
-import json
-from data import getData
-import copy
-
-N_IT = 1
-ETA = 0.001
-
-users = {}
-userMovies = {}
-
-def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
-
-class RBM():
-
-    def __init__(self, data):
-        
-        self.F = 100
-        self.K = 5
-        self.m = 0
-
-        #self.m = data.shape[0]   # No of movies rated by user
-        for i, u in enumerate(users):
-            temp = [movieId for (movieId, rating) in data[u]]
-            self.m = max(self.m, max(i for i in temp) + 1)
-        
-        self.h = np.random.rand(self.F) - 0.5
-        self.featureBias = np.random.rand(self.F) - 0.5
-        self.movieBias = np.random.rand(self.m, self.K) - 0.5
-        self.w = np.random.rand(self.F, self.m, self.K) - 0.5
-        self.data = data
-        
-    def train(self):
-        for it in range(N_IT):
-            for u in users:
-                data = copy.deepcopy(self.data[u])
-
-                w = self.getW(userMovies[u])
-                posAssociations, self.h = self.fwdProp(data, userMovies[u])
-                visibleProb = self.bwdProp(self.h, userMovies[u])
-                negAssociations, temp = self.fwdProp(visibleProb, userMovies[u])
-
-                w += ETA * (posAssociations - negAssociations) / len(userMovies[u]) 
-                self.setW(userMovies[u], w)
-                error = np.sum((data - visibleProb) ** 2)
-                error = np.sqrt(error/len(data))
-                print(it, u, error)
+import theano
+import theano.tensor as T
+import theano.sparse
 
 
-    def getW(self, movies):
+x = T.matrix()
+y = T.matrix()
 
-        a = np.zeros((self.F, 1, self.K))
-        for m in movies:
-            a = np.concatenate((a, np.expand_dims(self.w[:,m,:], axis=1)), axis=1)
-        return a[:,1:,]
 
-    def setW(self, movies, w):
-        
-        it = 0
-        for m in movies:
-            self.w[:, m, :] = w[:, it, :]
-            it += 1
-        
-    def getMovieBias(self, movies):
-        
-        a = np.zeros((1, self.K))
-        for m in movies:
-            a = np.concatenate((a, np.expand_dims(self.movieBias[m,:], axis=0)), axis=0)
-        return a[1:,]
+def outer(x, y):
+    return x[:, :, np.newaxis] * y[:, np.newaxis, :]
 
-    def fwdProp(self, inp, movies):
-        hiddenUnit = np.copy(self.featureBias)
-        for j in range(self.F):
-            hiddenUnit[j] += np.tensordot(inp, self.getW(movies)[j])
-        hiddenProb = sigmoid(hiddenUnit)
-        hiddenStates = hiddenProb > np.random.rand(self.F)
-        hiddenAssociations = np.zeros((self.F, len(movies), self.K)) 
-        for j in range(self.F):
-            hiddenAssociations[j] = hiddenProb[j] * inp
-        return hiddenAssociations, hiddenStates
 
-    def bwdProp(self, inp, movies):
-        visibleUnit = self.getMovieBias(movies)
-        for j in range(self.F):
-            visibleUnit += inp[j] * self.getW(movies)[j]
-        visibleProb = sigmoid(visibleUnit)
-        return visibleProb
+def cast32(x):
+    return T.cast(x, 'float32')
 
-    def predictor(self, movieId, userId):
 
-        w = self.getW(userMovies[userId])
-        
-        #making predictions part Vq not given
-        data = copy.deepcopy(self.data[userId])
-        probs = np.ones(5)
-        
-        mx, index = -1, 0
+class CFRBM:
+    def __init__(self, num_visible, num_hidden, initial_v=None,
+                 initial_weigths=None, debug=False):
+        self.dim = (num_visible, num_hidden)
+        self.num_visible = num_visible
+        self.num_hidden = num_hidden
 
-        for i in range(5):
-            calc = 1.0
-            for j in range(self.F):
-                temp = np.tensordot(data, self.getW(userMovies[userId])[j]) + self.featureBias[j]
-                temp = 1.0 + np.exp(temp)
-                calc *= temp
-            probs[i] = calc
+        if initial_weigths:
+            initial_weights = np.load('{}.W.npy'.format(initial_weigths))
+            initial_hbias = np.load('{}.h.npy'.format(initial_weigths))
+            initial_vbias = np.load('{}.b.npy'.format(initial_weigths))
+        else:
+            initial_weights = np.array(np.random.normal(0, 0.1, size=self.dim),
+                                       dtype=np.float32)
+            initial_hbias = np.zeros(num_hidden, dtype=np.float32)
 
-            if mx < probs[i]:
-                index = i
-                mx = probs[i]
+            if initial_v:
+                initial_vbias = np.array(initial_v, dtype=np.float32)
+            else:
+                initial_vbias = np.zeros(num_visible, dtype=np.float32)
 
-        return index
+        self.weights = theano.shared(value=initial_weights,
+                                     borrow=True,
+                                     name='weights')
+        self.vbias = theano.shared(value=initial_vbias,
+                                   borrow=True,
+                                   name='vbias')
+        self.hbias = theano.shared(value=initial_hbias,
+                                   borrow=True,
+                                   name='hbias')
 
-def demo():
-    data = [[0,0,1,0,0], [0,1,0,0,0], [0,0,0,0,1]]
-    data = np.asarray(data)
-    rbm = RBM(data)
-    rbm.train()
+        prev_gw = np.zeros(shape=self.dim, dtype=np.float32)
+        self.prev_gw = theano.shared(value=prev_gw, borrow=True, name='g_w')
 
-## Test Model
-if __name__ == '__main__': 
-    
-    rawData1 = getData()
-    rawData = {}
-    ct = 0
-    for i in rawData1.keys():
-        rawData[i] = rawData1[i]
-        ct += 1
-        if ct >= 1000:
-            pdb.set_trace()
-            break
-    print('Data done')
-    users = rawData.keys()
-    users.sort()
-    data = {}
-    for i, u in enumerate(users):
-        userMovies[u] = [movieId for (movieId, rating) in rawData[u]]
-        data[u] = [[0]*(rat-1) + [1] + [0]*(5-rat) for (movId, rat) in rawData[u]]
-        data[u] = np.asarray(data[u])
+        prev_gh = np.zeros(num_hidden, dtype=np.float32)
+        self.prev_gh = theano.shared(value=prev_gh, borrow=True, name='g_h')
 
-    rbm = RBM(data)
-    print('Training DONE!')
-    rbm.train()
-    pdb.set_trace()
+        prev_gv = np.zeros(num_visible, dtype=np.float32)
+        self.prev_gv = theano.shared(value=prev_gv, borrow=True, name='g_v')
+
+        self.theano_rng = T.shared_randomstreams.RandomStreams(
+            np.random.RandomState(17).randint(2**30))
+
+        if debug:
+            theano.config.compute_test_value = 'warn'
+            theano.config.optimizer = 'None'
+            theano.config.exception_verbosity = 'high'
+
+    def prop_up(self, vis):
+        return T.nnet.sigmoid(T.dot(vis, self.weights) + self.hbias)
+
+    def sample_hidden(self, vis):
+        activations = self.prop_up(vis)
+        h1_sample = self.theano_rng.binomial(size=activations.shape,
+                                             n=1, p=activations,
+                                             dtype=theano.config.floatX)
+        return h1_sample, activations
+
+    def prop_down(self, h):
+        return T.nnet.sigmoid(T.dot(h, self.weights.T) + self.vbias)
+
+    def sample_visible(self, h, k=5):
+        activations = self.prop_down(h)
+        k_ones = T.ones(k)
+
+        partitions = \
+            activations.reshape((-1, k)).sum(axis=1).reshape((-1, 1)) * k_ones
+
+        activations = activations / partitions.reshape(activations.shape)
+        v1_sample = self.theano_rng.binomial(size=activations.shape,
+                                             n=1, p=activations,
+                                             dtype=theano.config.floatX)
+
+        return v1_sample, activations
+
+    def contrastive_divergence_1(self, v1):
+        h1, _ = self.sample_hidden(v1)
+        v2, v2a = self.sample_visible(h1)
+        h2, h2a = self.sample_hidden(v2)
+
+        return (v1, h1, v2, v2a, h2, h2a)
+
+    def gradient(self, v1, h1, v2, h2p, masks):
+        v1h1_mask = outer(masks, h1)
+
+        gw = ((outer(v1, h1) * v1h1_mask) -
+              (outer(v2, h2p) * v1h1_mask)).mean(axis=0)
+        gv = ((v1 * masks) - (v2 * masks)).mean(axis=0)
+        gh = (h1 - h2p).mean(axis=0)
+
+        return (gw, gv, gh)
+
+    def cdk_fun(self, vis, masks, k=1, w_lr=0.000021, v_lr=0.000025,
+                h_lr=0.000025, decay=0.0000, momentum=0.0):
+        v1, h1, v2, v2a, h2, h2a = self.contrastive_divergence_1(vis)
+
+        for i in range(k-1):
+            v1, h1, v2, v2a, h2, h2a = self.contrastive_divergence_1(v2)
+
+        (W, V, H) = self.gradient(v1, h1, v2, h2a, masks)
+
+        if decay:
+            W -= decay * self.weights
+
+        updates = [
+            (self.weights,
+             cast32(self.weights + (momentum * self.prev_gw) +
+                                   (W * w_lr))),
+            (self.vbias,
+             cast32(self.vbias + (momentum * self.prev_gv) +
+                                 (V * v_lr))),
+            (self.hbias,
+             cast32(self.hbias + (momentum * self.prev_gh) +
+                                 (H * h_lr))),
+            (self.prev_gw, cast32(W)),
+            (self.prev_gh, cast32(H)),
+            (self.prev_gv, cast32(V))
+        ]
+
+        return theano.function([vis, masks], updates=updates)
+
+    def predict(self, v1):
+        h1, _ = self.sample_hidden(v1)
+        v2, v2a = self.sample_visible(h1)
+        return theano.function([v1], v2a)
